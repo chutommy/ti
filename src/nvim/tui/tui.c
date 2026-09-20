@@ -107,6 +107,8 @@ struct TUIData {
   bool title_enabled;
   bool sync_output;
   bool sync_output_active;
+  bool sync_hold;  // display held (DEC 2026) since terminal start, until text is drawn
+  bool sync_hold_drawn;
   bool busy, is_invisible, want_invisible;
   bool set_cursor_color_as_str;
   bool cursor_has_color;
@@ -570,6 +572,13 @@ static void terminfo_start(TUIData *tui)
   tui->bce = tui->ti.back_color_erase;
   // Set 't_Co' from the result of terminfo & fix_terminfo.
   t_colors = tui->ti.max_colors;
+  // Hold the display (synchronized update) until the first text is drawn, so the
+  // terminal keeps showing its contents instead of a blank screen. Terminals
+  // without DEC mode 2026 ignore it.
+  out(tui, S_LEN("\x1b[?2026h"));
+  tui->sync_output_active = true;
+  tui->sync_hold = true;
+  tui->sync_hold_drawn = false;
   // Enter alternate screen, save title, and clear.
   // NOTE: Do this *before* changing terminal settings. #6433
   terminfo_out(tui, kTerm_enter_ca_mode);
@@ -692,6 +701,9 @@ static void terminfo_disable(TUIData *tui)
   // Send a DA1 request. When the terminal responds we know that it has
   // processed all of our requests and won't be emitting anymore sequences.
   out(tui, S_LEN("\x1b[c"));
+
+  // Release the startup hold even if nothing was drawn.
+  tui->sync_hold = false;
 
   // Immediately flush the buffer and wait for the DA1 response.
   flush_buf(tui, kFlushBufFinal);
@@ -1964,6 +1976,7 @@ void tui_raw_line(TUIData *tui, Integer g, Integer linerow, Integer startcol, In
     ELOG("Invalid UI event: 'grid_line' out of range");
     return;
   }
+  tui->sync_hold_drawn = true;
   for (Integer c = startcol; c < endcol; c++) {
     grid->cells[linerow][c].data = chunk[c - startcol];
     grid->cells[linerow][c].attr = attrs[c - startcol];
@@ -2649,12 +2662,14 @@ static void flush_buf(TUIData *tui, FlushBufFinish finish)
     }
   }
 
-  // End synchronized update on the final flush.
-  if (finish == kFlushBufFinal && tui->sync_output_active) {
+  // End synchronized update on the final flush, but keep the startup hold until text is drawn.
+  if (finish == kFlushBufFinal && tui->sync_output_active
+      && (!tui->sync_hold || tui->sync_hold_drawn)) {
     static const char sync_end[] = "\x1b[?2026l";
     memcpy(post, sync_end, sizeof sync_end);
     post_len += sizeof sync_end - 1;
     tui->sync_output_active = false;
+    tui->sync_hold = false;
   }
 
   // Once synchronized output has ended, or when it was not active, make the cursor
